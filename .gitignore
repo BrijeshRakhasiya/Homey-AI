@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local secrets and machine-specific files
+.env
+.env.*
+!.env.example
+review_presentation_guide.md
+*.pem
+*.key
+*.pfx
+*.crt
+*.log
+secrets/

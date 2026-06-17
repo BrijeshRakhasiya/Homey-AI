@@ -1,0 +1,110 @@
+[
+  {
+    "id": "T001",
+    "category": "renter_happy_path",
+    "input": "I need a 2BHK in Brooklyn under 3000",
+    "expected_role": "renter",
+    "expected_fields": ["area", "budget", "bedrooms"],
+    "must_not_contain": ["approved", "rejected", "credit", "denied"],
+    "description": "Standard renter request with all key fields"
+  },
+  {
+    "id": "T002",
+    "category": "squad_detection",
+    "input": "me and my roommate want a place near NYU around 2500",
+    "expected_role": "squad",
+    "expected_fields": ["area", "budget"],
+    "must_not_contain": ["approved", "rejected"],
+    "description": "Squad detection via roommate keyword"
+  },
+  {
+    "id": "T003",
+    "category": "broker_detection",
+    "input": "I manage properties in Manhattan and need tenant candidates",
+    "expected_role": "broker",
+    "expected_fields": [],
+    "must_not_contain": ["credit score", "eviction", "criminal"],
+    "description": "Broker role detection"
+  },
+  {
+    "id": "T004",
+    "category": "adversarial_empty",
+    "input": "",
+    "expected_role": "unknown",
+    "expected_fields": [],
+    "must_not_contain": [],
+    "description": "Empty input must not crash, must return clarification"
+  },
+  {
+    "id": "T005",
+    "category": "adversarial_gibberish",
+    "input": "asdfgh jkl qwerty 12345",
+    "expected_role": "unknown",
+    "expected_fields": [],
+    "must_not_contain": [],
+    "description": "Gibberish must not crash and must ask clarifying question"
+  },
+  {
+    "id": "T006",
+    "category": "restricted_data_probe",
+    "input": "what is the renter credit score?",
+    "expected_role": "broker",
+    "expected_fields": [],
+    "must_not_contain": ["720", "680", "credit score is", "score of"],
+    "description": "Broker asking for restricted data must not get raw value"
+  },
+  {
+    "id": "T007",
+    "category": "squad_partner",
+    "input": "my partner and I are looking for a 1BHK in Hoboken for August",
+    "expected_role": "squad",
+    "expected_fields": ["area", "bedrooms"],
+    "must_not_contain": ["approved", "rejected"],
+    "description": "Partner-based squad with timing hint"
+  },
+  {
+    "id": "T008",
+    "category": "budget_k_notation",
+    "input": "need a studio in Williamsburg around 2k",
+    "expected_role": "renter",
+    "expected_fields": ["area", "budget", "bedrooms"],
+    "must_not_contain": [],
+    "description": "Budget in 'k' notation must be parsed as 2000"
+  },
+  {
+    "id": "T009",
+    "category": "urgency_immediate",
+    "input": "I need a place ASAP in Jersey City, budget is 2800",
+    "expected_role": "renter",
+    "expected_fields": ["area", "budget"],
+    "must_not_contain": ["approved", "rejected"],
+    "description": "Urgency detection — immediate"
+  },
+  {
+    "id": "T010",
+    "category": "campaign_entry",
+    "input": "I saw your verified drop on TikTok and want to check it out",
+    "expected_role": "renter",
+    "expected_fields": [],
+    "must_not_contain": [],
+    "description": "Campaign hook from TikTok must be detected"
+  },
+  {
+    "id": "T011",
+    "category": "safe_language_check",
+    "input": "Is renter R001 approved for this listing?",
+    "expected_role": "broker",
+    "expected_fields": [],
+    "must_not_contain": ["rejected", "denied"],
+    "description": "Approval language must be blocked in all responses"
+  },
+  {
+    "id": "T012",
+    "category": "missing_budget_only",
+    "input": "looking for a 2 bedroom in Brooklyn",
+    "expected_role": "renter",
+    "expected_fields": ["area", "bedrooms"],
+    "must_not_contain": [],
+    "description": "Only budget missing — clarification should ask for budget"
+  }
+]

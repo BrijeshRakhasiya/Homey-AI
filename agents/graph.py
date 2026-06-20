@@ -15,12 +15,13 @@ Why LangGraph instead of one big prompt?
 
 import asyncio
 import os
+import re
 from typing import TypedDict, Optional, List, Any
 
 from langgraph.graph import StateGraph, END
 
 from agents.intent_atlas import run_intent_atlas
-from agents.retrieval_gov import governed_retrieval, build_index, SAMPLE_CORPUS
+from agents.retrieval_gov import governed_retrieval
 from observability.stream import (
     emit_guard_event, emit_graph_event, emit_retrieval_event
 )
@@ -49,10 +50,31 @@ BLOCKED_PHRASES = [
     "background report", "failed screening",
 ]
 
+BLOCKED_SEMANTIC_PATTERNS = [
+    r"\bmeets the threshold\b",
+    r"\bqualif(y|ies|ied|ying) for\b",
+    r"\bmeets all requirements\b",
+    r"\bpasses the screen(ing)?\b",
+    r"\bstrong fit\b",
+    r"\bgood fit\b",
+    r"\bno issues found\b",
+]
+
 SAFE_FALLBACK_RESPONSE = (
     "I can share some helpful context about this listing, "
     "but final decisions are made by the property team after a full review."
 )
+
+
+def _guard_match(response: str) -> Optional[str]:
+    normalized = response.lower()
+    for phrase in BLOCKED_PHRASES:
+        if phrase in normalized:
+            return phrase
+    for pattern in BLOCKED_SEMANTIC_PATTERNS:
+        if re.search(pattern, normalized):
+            return pattern
+    return None
 
 
 # ─── Nodes ────────────────────────────────────────────────────────────────────
@@ -86,7 +108,6 @@ def node_retrieve(state: HomeyState) -> HomeyState:
         return state
 
     try:
-        build_index(SAMPLE_CORPUS)
         result = governed_retrieval(
             query=state["raw_input"],
             audience=state["audience"],
@@ -177,12 +198,7 @@ def node_guard(state: HomeyState) -> HomeyState:
     This node ALWAYS runs regardless of upstream results.
     """
     response = state.get("response") or ""
-    triggered_phrase = None
-
-    for phrase in BLOCKED_PHRASES:
-        if phrase.lower() in response.lower():
-            triggered_phrase = phrase
-            break
+    triggered_phrase = _guard_match(response)
 
     if triggered_phrase:
         state["response"]     = SAFE_FALLBACK_RESPONSE

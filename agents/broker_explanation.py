@@ -1,53 +1,88 @@
 """
-agents/broker_explanation.py  — Task 14: Broker Explanation
-Generates safe, structured summaries for broker/operator view.
+agents/broker_explanation.py  
+Safe 4-part broker explanation with two-layer restricted data blocking.
 
-Four-part output: summary | evidence | caveat | next_action
-Restricted fields are BLOCKED and listed in audit trail.
-No approval/rejection language — ever.
+Layer 1 (v1): field NAME in RESTRICTED_FIELDS list
+Layer 2 (v2): field VALUE contains restricted content patterns
+              catches: notes="fico 680 eviction 2019"
+
+Output changes from v1:
+  - fit_score REMOVED from broker output (Aiden's point #6)
+  - fit_label REPLACED with: "ready_to_proceed" | "needs_follow_up" | "needs_more_info"
+  - No numeric scores, no "strong/weak" labels in broker-facing text
 """
 
-from typing import List, Optional
+import re
+from typing import Any, List, Optional
 from pydantic import BaseModel
 from observability.stream import emit_broker_event
 
-# ─── Output model ─────────────────────────────────────────────────────────────
+
+# ── Restricted field names (Layer 1) ──────────────────────────────────────────
+RESTRICTED_FIELDS: list[str] = [
+    "credit_score", "criminal_record", "eviction_history",
+    "raw_background_report", "ssn", "dob", "medical_history",
+    "fico", "screening_result", "risk_level",
+]
+
+# ── Restricted content patterns (Layer 2) ─────────────────────────────────────
+RESTRICTED_CONTENT_PATTERNS: dict[str, str] = {
+    "eviction_content":  r'\beviction\b',
+    "criminal_content":  r'\bcriminal\b|\barrest\b|\bconviction\b',
+    "credit_content":    r'\bfico\b|\bcredit[\s_]?score\b|\b[5-8]\d{2}\s*score\b',
+    "screening_content": r'\bscreening\b|\bbackground[\s_]?report\b',
+}
+
+
+def _scan_value_for_restricted_content(value: Any) -> list[str]:
+    """Return list of content pattern labels found in value."""
+    hits = []
+    val_str = str(value).lower()
+    for label, pattern in RESTRICTED_CONTENT_PATTERNS.items():
+        if re.search(pattern, val_str):
+            hits.append(label)
+    return hits
+
+
+# ── Output model ───────────────────────────────────────────────────────────────
 
 class BrokerExplanation(BaseModel):
     lead_id: str
-    summary: str
-    evidence: List[str]
-    caveat: Optional[str]
-    next_action: str
-    restricted_fields_blocked: List[str]
+    # No fit_score exposed to broker — internal only
+    broker_status: str            # "ready_to_proceed" | "needs_follow_up" | "needs_more_info"
+    summary: str                  # safe, factual, no score/label
+    evidence: List[str]           # observable alignment signals
+    caveat: Optional[str]         # what is missing or unconfirmed
+    next_action: str              # concrete next step
+    restricted_fields_blocked: List[str]   # audit trail (names only, no values)
     dashboard_event: dict
 
 
-# ─── Restricted field list ────────────────────────────────────────────────────
+# ── Safe language maps (no approval words) ────────────────────────────────────
 
-RESTRICTED_FIELDS = [
-    "credit_score", "criminal_record", "eviction_history",
-    "raw_background_report", "ssn", "dob", "medical_history",
-]
-
-# ─── Safe language ────────────────────────────────────────────────────────────
-
-SUMMARY_MAP = {
-    "strong":     "This group shows strong alignment with your listing criteria.",
-    "moderate":   "This group shows moderate alignment. A follow-up conversation is recommended.",
-    "weak":       "This group has some gaps relative to your listing. Review the notes below.",
-    "incomplete": "This profile is not yet complete. Additional information is needed.",
+BROKER_STATUS_MAP: dict[str, str] = {
+    "strong":     "ready_to_proceed",
+    "moderate":   "needs_follow_up",
+    "weak":       "needs_more_info",
+    "incomplete": "needs_more_info",
 }
 
-NEXT_ACTION_MAP = {
+SUMMARY_MAP: dict[str, str] = {
+    "strong":     "This group's stated preferences align with your listing on all key dimensions.",
+    "moderate":   "This group shows alignment on several dimensions. A follow-up conversation is recommended.",
+    "weak":       "This group has notable gaps relative to your listing. Review the items below.",
+    "incomplete": "This profile is not yet complete. Additional information is needed before evaluation.",
+}
+
+NEXT_ACTION_MAP: dict[str, str] = {
     "strong":     "Consider inviting this group to view the property.",
-    "moderate":   "Request the missing items listed below before proceeding.",
+    "moderate":   "Request the missing items listed below before scheduling a viewing.",
     "weak":       "Assess whether the gaps are dealbreakers before investing further time.",
     "incomplete": "Ask the renter to complete their profile first.",
 }
 
 
-# ─── Builder ──────────────────────────────────────────────────────────────────
+# ── Builder ────────────────────────────────────────────────────────────────────
 
 def build_broker_explanation(
     lead_id:    str,
@@ -55,40 +90,61 @@ def build_broker_explanation(
     raw_fields: dict,
 ) -> BrokerExplanation:
     """
-    Build a broker-safe explanation from soft-fit output.
+    Build broker-safe explanation.
 
-    Failure case: raw_fields contains credit_score or criminal_record
-    → those fields are captured in restricted_fields_blocked
-    → they NEVER appear in summary, evidence, caveat, or next_action
-    → audit trail shows what was blocked
+    Layer 1: field names in RESTRICTED_FIELDS → blocked, audit trail entry.
+    Layer 2: field values containing restricted content → value redacted, audit trail entry.
 
-    Dashboard event: broker_explanation_generated with fit_label
-    and restricted_fields_blocked count.
+    fit_score is NEVER included in broker output.
+    fit_label is translated to broker_status (no approval connotation).
+
+    Adversarial test C2:
+      Input: raw_fields = {"notes": "renter has eviction 2019, fico 680"}
+      Layer 1: "notes" not in RESTRICTED_FIELDS → passes name check.
+      Layer 2: value contains "eviction" + "fico" → blocked, redacted.
+      Output: "notes[content:eviction_content,credit_content]" in restricted_fields_blocked.
+              notes value NEVER reaches summary or evidence text.
     """
-    # Block restricted fields — audit trail only
-    blocked = [f for f in RESTRICTED_FIELDS if f in raw_fields]
+    blocked: list[str] = []
+    safe_raw: dict     = {}
 
-    fit_label = fit_result.get("fit_label", "incomplete")
-    evidence  = fit_result.get("fit_reasons", [])
-    missing   = fit_result.get("missing_signals", [])
+    for field, value in raw_fields.items():
+        # Layer 1: name check
+        if field in RESTRICTED_FIELDS:
+            blocked.append(field)
+            continue  # don't include in safe_raw
 
-    summary     = SUMMARY_MAP.get(fit_label, SUMMARY_MAP["incomplete"])
-    next_action = NEXT_ACTION_MAP.get(fit_label, NEXT_ACTION_MAP["incomplete"])
+        # Layer 2: value content check
+        if isinstance(value, str):
+            content_hits = _scan_value_for_restricted_content(value)
+            if content_hits:
+                label = f"{field}[content:{','.join(content_hits)}]"
+                blocked.append(label)
+                safe_raw[field] = "[REDACTED — restricted content detected]"
+                continue
+
+        safe_raw[field] = value
+
+    fit_label     = fit_result.get("fit_label", "incomplete")
+    evidence      = fit_result.get("fit_reasons", [])
+    missing       = fit_result.get("missing_signals", [])
+    broker_status = BROKER_STATUS_MAP.get(fit_label, "needs_more_info")
+    summary       = SUMMARY_MAP.get(fit_label, SUMMARY_MAP["incomplete"])
+    next_action   = NEXT_ACTION_MAP.get(fit_label, NEXT_ACTION_MAP["incomplete"])
 
     caveat: Optional[str] = None
     if missing:
         caveat = f"Items not yet confirmed: {', '.join(missing)}."
     if blocked:
-        caveat_note = (
-            f"Note: {len(blocked)} field(s) from the background report "
-            "are not included here and require separate review."
-        )
-        caveat = f"{caveat} {caveat_note}" if caveat else caveat_note
+        note = (f"{len(blocked)} field(s) from background or screening data "
+                "require separate review and are not shown here.")
+        caveat = f"{caveat} {note}" if caveat else note
 
-    event = emit_broker_event(lead_id, fit_label, len(blocked))
+    event = emit_broker_event(lead_id, broker_status, len(blocked))
 
     return BrokerExplanation(
         lead_id=lead_id,
+        broker_status=broker_status,
         summary=summary,
         evidence=evidence,
         caveat=caveat,

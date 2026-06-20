@@ -19,4 +19,5 @@ review_presentation_guide.md
 *.pfx
 *.crt
 *.log
+observability/traces/*.jsonl
 secrets/

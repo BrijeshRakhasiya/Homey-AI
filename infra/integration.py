@@ -17,6 +17,7 @@ Test: curl -X POST http://localhost:8000/homey/message \
         -d '{"raw_message": "I need a 2BHK in Brooklyn under 3000"}'
 """
 
+import os
 import uuid
 from typing import Optional
 
@@ -34,6 +35,7 @@ from routers.campaign_router import route_campaign_entry
 from routers.community_router import get_community_context
 from infra.latency_router import route_for_latency
 from infra.schema_adapter import adapt_renter_payload
+from agents.retrieval_gov import bootstrap_retrieval_index
 from schemas.fit import SoftFitInput, PropertyRequirement, RenterProfile
 from schemas.squad import SquadMember
 
@@ -49,6 +51,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def bootstrap_retrieval():
+    if os.getenv("HOMEY_RETRIEVAL", "false").lower() == "true":
+        bootstrap_retrieval_index()
 
 # Session-level memory (one per session in production)
 _memory_stores: dict[str, MemoryStore] = {}

@@ -10,6 +10,8 @@ Run: python stress/combined_stress_day.py
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from routers.campaign_router import route_campaign_entry
 from routers.community_router import get_community_context

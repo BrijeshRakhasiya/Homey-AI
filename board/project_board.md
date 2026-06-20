@@ -1,5 +1,5 @@
 # Homey Intelligence Sprint — Project Board
-**Candidate:** Brijesh Rakhasiya | **Status:** Sprint Complete
+**Candidate:** Brijesh Rakhasiya | **Status:** Prototype review
 
 ---
 
@@ -22,7 +22,7 @@
 | 13 | Micro-Community Context | Brijesh | feat/routers | ✅ Done | `routers/community_router.py` | `community_context_applied` |
 | 14 | Broker Explanation | Brijesh | feat/broker | ✅ Done | `agents/broker_explanation.py` | `broker_explanation_generated` |
 | 15 | Memory Policy | Brijesh | feat/memory | ✅ Done | `agents/memory_policy.py` | `memory_stored` / `blocked_memory_attempt` |
-| 16 | Integration Handshake | Brijesh | feat/api | ✅ Done | `infra/integration.py` | `api_request_received` |
+| 16 | Integration Handshake | Brijesh | feat/api | ⚠️ Merge candidate | `infra/integration.py` | `api_request_received` |
 | 17 | Project Board | Brijesh | — | ✅ Done | `board/project_board.md` | — |
 | 18 | Combined Stress Day | Brijesh | feat/stress | ✅ Done | `stress/combined_stress_day.py` | All 10+ events |
 | 19 | Live Defense | Brijesh | — | ✅ Ready | `board/project_board.md` (answers below) | — |

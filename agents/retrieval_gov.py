@@ -32,6 +32,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from schemas.retrieval import ChunkMetadata, RetrievedChunk, RetrievalResult
+from schemas.outbound import TrustReceipt
 from observability.stream import emit_retrieval_event, _emit
 
 # ── Index singleton — built once, reused per request ──────────────────────────
@@ -52,7 +53,49 @@ def _get_model():
 
 # ── Governance rules ──────────────────────────────────────────────────────────
 
-def is_chunk_allowed(meta: ChunkMetadata, audience: str) -> bool:
+def _metadata_value(meta, key: str, default=None):
+    if isinstance(meta, dict):
+        if "metadata" in meta and isinstance(meta["metadata"], dict):
+            meta = meta["metadata"]
+        return meta.get(key, default)
+    return getattr(meta, key, default)
+
+
+def _block_reason(meta, audience: str, surface: str = "renter_chat") -> Optional[str]:
+    sensitivity = _metadata_value(meta, "sensitivity", "public")
+    allowed_audience = _metadata_value(meta, "allowed_audience")
+    declared_audience = _metadata_value(meta, "audience")
+    is_stale = bool(_metadata_value(meta, "is_stale", False))
+    superseded_by = _metadata_value(meta, "superseded_by")
+    expires_at = _metadata_value(meta, "expires_at")
+    allowed_surface = _metadata_value(meta, "allowed_surface")
+
+    if expires_at:
+        try:
+            from datetime import datetime, timezone
+            expires = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            is_stale = is_stale or datetime.now(timezone.utc) > expires
+        except (TypeError, ValueError):
+            return "invalid_metadata"
+    if is_stale or superseded_by:
+        return "stale"
+    if sensitivity == "restricted" or declared_audience == "internal":
+        return "internal" if declared_audience == "internal" else "restricted"
+    if sensitivity == "internal" and audience == "renter":
+        return "internal"
+    if declared_audience == "broker" and audience == "renter":
+        return "internal"
+    if allowed_audience is not None and audience not in allowed_audience and "all" not in allowed_audience:
+        return "audience"
+    if allowed_surface is not None and surface not in allowed_surface:
+        return "surface"
+    return None
+
+
+def is_chunk_allowed(meta: ChunkMetadata | dict, audience: Optional[str] = None,
+                     role: Optional[str] = None, surface: str = "renter_chat") -> bool:
     """
     Return True only if this chunk is safe for this audience.
 
@@ -65,15 +108,8 @@ def is_chunk_allowed(meta: ChunkMetadata, audience: str) -> bool:
     → never passed to LLM context
     → never appears in response
     """
-    if meta.sensitivity == "restricted":
-        return False
-    if meta.sensitivity == "internal" and audience == "renter":
-        return False
-    if meta.is_stale:
-        return False
-    if audience not in meta.allowed_audience and "all" not in meta.allowed_audience:
-        return False
-    return True
+    resolved_audience = role or audience or "renter"
+    return _block_reason(meta, resolved_audience, surface) is None
 
 
 def mark_stale_by_age(meta: ChunkMetadata, max_age_days: int = 90) -> ChunkMetadata:
@@ -82,6 +118,32 @@ def mark_stale_by_age(meta: ChunkMetadata, max_age_days: int = 90) -> ChunkMetad
     if meta.created_date < cutoff:
         return meta.model_copy(update={"is_stale": True})
     return meta
+
+
+def detect_source_conflicts(chunks: list[RetrievedChunk]) -> list[dict]:
+    """Detect contradictory governed claims before they reach response generation."""
+    claims: dict[str, dict[str, list[str]]] = {}
+    for chunk in chunks:
+        key = chunk.metadata.claim_key
+        value = chunk.metadata.claim_value
+        if not key or value is None:
+            continue
+        claims.setdefault(key, {}).setdefault(str(value), []).append(
+            chunk.metadata.source_id
+        )
+    conflicts = [
+        {"claim_key": key, "values": values}
+        for key, values in claims.items()
+        if len(values) > 1
+    ]
+    for conflict in conflicts:
+        _emit({
+            "event_type": "source_conflict_detected",
+            "claim_key": conflict["claim_key"],
+            "conflicting_value_count": len(conflict["values"]),
+            "source_count": sum(len(ids) for ids in conflict["values"].values()),
+        })
+    return conflicts
 
 
 def _lexical_retrieval(
@@ -97,8 +159,13 @@ def _lexical_retrieval(
         if len(term) > 3
     }
     scored: List[Tuple[int, str, ChunkMetadata]] = []
+    blocked_count = stale_count = internal_count = 0
     for text, meta in corpus:
-        if not is_chunk_allowed(meta, audience):
+        reason = _block_reason(meta, audience)
+        if reason:
+            blocked_count += 1
+            stale_count += int(reason == "stale")
+            internal_count += int(reason in {"internal", "restricted"})
             continue
         text_terms = set(re.findall(r"[a-z0-9]+", text.lower()))
         score = len(query_terms & text_terms)
@@ -118,8 +185,30 @@ def _lexical_retrieval(
             "I don't have enough verified information to answer that. "
             "Please contact the VryfID support team or complete your profile first."
         )
+    conflicts = detect_source_conflicts(allowed)
+    if conflicts:
+        evidence_sufficient = False
+        fallback = (
+            "I found conflicting verified information. "
+            "A team member should review the sources before I answer."
+        )
 
     event = emit_retrieval_event(audience, len(allowed), evidence_sufficient, session_id)
+    receipt = TrustReceipt(
+        chunks_considered=len(corpus),
+        chunks_allowed=len(allowed),
+        chunks_blocked=blocked_count,
+        chunks_stale=stale_count,
+        chunks_internal_blocked=internal_count,
+        freshness_status="stale" if stale_count and not allowed else (
+            "mixed" if stale_count else ("fresh" if allowed else "unknown")
+        ),
+        evidence_sufficient=evidence_sufficient,
+        fallback_reason=None if evidence_sufficient else (
+            "source_conflict" if conflicts else "insufficient_verified_evidence"
+        ),
+        source_ids=[chunk.metadata.source_id for chunk in allowed],
+    )
     return RetrievalResult(
         query=query,
         audience=audience,
@@ -127,6 +216,7 @@ def _lexical_retrieval(
         evidence_sufficient=evidence_sufficient,
         fallback_message=fallback,
         dashboard_event=event,
+        trust_receipt=receipt,
     )
 
 
@@ -310,17 +400,22 @@ def governed_retrieval(
     distances, indices = _index.search(query_vec, fetch_k)
 
     allowed: List[RetrievedChunk] = []
-    blocked_count = 0
+    blocked_count = stale_count = internal_count = 0
+    considered_count = 0
 
     for idx, dist in zip(indices[0], distances[0]):
         if idx < 0 or idx >= len(_chunks):
             continue
+        considered_count += 1
         text, meta = _chunks[idx]
         meta = mark_stale_by_age(meta)
-        if is_chunk_allowed(meta, audience):
+        reason = _block_reason(meta, audience)
+        if reason is None:
             allowed.append(RetrievedChunk(text=text, metadata=meta, score=float(dist)))
         else:
             blocked_count += 1
+            stale_count += int(reason == "stale")
+            internal_count += int(reason in {"internal", "restricted"})
         if len(allowed) == top_k:
             break
 
@@ -340,13 +435,35 @@ def governed_retrieval(
             "I don't have enough verified information to answer that. "
             "Please contact the VryfID support team or complete your profile first."
         )
+    conflicts = detect_source_conflicts(allowed)
+    if conflicts:
+        evidence_sufficient = False
+        fallback = (
+            "I found conflicting verified information. "
+            "A team member should review the sources before I answer."
+        )
 
     event = emit_retrieval_event(audience, len(allowed), evidence_sufficient, session_id)
+    receipt = TrustReceipt(
+        chunks_considered=considered_count,
+        chunks_allowed=len(allowed),
+        chunks_blocked=blocked_count,
+        chunks_stale=stale_count,
+        chunks_internal_blocked=internal_count,
+        freshness_status="mixed" if stale_count and allowed else (
+            "stale" if stale_count else ("fresh" if allowed else "unknown")
+        ),
+        evidence_sufficient=evidence_sufficient,
+        fallback_reason=None if evidence_sufficient else (
+            "source_conflict" if conflicts else "insufficient_verified_evidence"
+        ),
+        source_ids=[chunk.metadata.source_id for chunk in allowed],
+    )
 
     return RetrievalResult(
         query=query, audience=audience, chunks=allowed,
         evidence_sufficient=evidence_sufficient,
-        fallback_message=fallback, dashboard_event=event,
+        fallback_message=fallback, dashboard_event=event, trust_receipt=receipt,
     )
 
 

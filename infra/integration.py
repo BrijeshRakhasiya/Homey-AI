@@ -19,11 +19,12 @@ Test: curl -X POST http://localhost:8000/homey/message \
 
 import os
 import uuid
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from agents.intent_atlas import run_intent_atlas
 from agents.graph import run_graph
@@ -36,13 +37,23 @@ from routers.community_router import get_community_context
 from infra.latency_router import route_for_latency
 from infra.schema_adapter import adapt_renter_payload
 from agents.retrieval_gov import bootstrap_retrieval_index
+from infra.feature_flags import flags_used_in_response, is_enabled
+from schemas.outbound import GuardStatus, TrustReceipt
 from schemas.fit import SoftFitInput, PropertyRequirement, RenterProfile
 from schemas.squad import SquadMember
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if os.getenv("HOMEY_RETRIEVAL", "false").lower() == "true":
+        bootstrap_retrieval_index()
+    yield
+
 
 app = FastAPI(
     title="Homey Intelligence API",
     description="VryfID Homey AI layer — all 20 sprint tasks integrated",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -51,12 +62,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def bootstrap_retrieval():
-    if os.getenv("HOMEY_RETRIEVAL", "false").lower() == "true":
-        bootstrap_retrieval_index()
 
 # Session-level memory (one per session in production)
 _memory_stores: dict[str, MemoryStore] = {}
@@ -88,6 +93,13 @@ class MessageResponse(BaseModel):
     guard_passed: bool
     events: list
     error: Optional[str] = None
+    response_type: str = "answer"
+    confidence: float = 0.0
+    missing_fields: list[str] = Field(default_factory=list)
+    source_receipt: TrustReceipt = Field(default_factory=TrustReceipt)
+    guard_status: GuardStatus = Field(default_factory=GuardStatus)
+    next_action: Optional[str] = None
+    feature_flags_used: list[str] = Field(default_factory=list)
 
 
 class FitRequest(BaseModel):
@@ -157,6 +169,20 @@ def process_message(req: MessageRequest):
                 latency_tier=latency.tier,
                 guard_passed=True,
                 events=events,
+                response_type="answer",
+                confidence=intent_result.confidence,
+                missing_fields=intent_result.missing_fields,
+                source_receipt=TrustReceipt(
+                    fallback_reason="static_route",
+                    evidence_sufficient=False,
+                ),
+                guard_status=GuardStatus(
+                    input_checked=True, output_checked=False, triggered=False
+                ),
+                next_action=intent_result.clarification_prompt,
+                feature_flags_used=flags_used_in_response(
+                    ["HOMEY_INTENT_V2", "HOMEY_FLIGHT_RECORDER"]
+                ),
             )
 
         # ── Campaign entry (Task 7) ────────────────────────────────────────
@@ -185,6 +211,19 @@ def process_message(req: MessageRequest):
             guard_passed=graph_result.get("guard_passed", True),
             events=events,
             error=graph_result.get("error"),
+            response_type=graph_result.get("response_type", "answer"),
+            confidence=(graph_result.get("intent") or {}).get("confidence", 0.0),
+            missing_fields=(graph_result.get("intent") or {}).get("missing_fields", []),
+            source_receipt=graph_result.get("source_receipt", {}),
+            guard_status=graph_result.get("guard_status", {}),
+            next_action=(
+                (graph_result.get("intent") or {}).get("clarification_prompt")
+                or "Continue with the safest relevant next step"
+            ),
+            feature_flags_used=flags_used_in_response([
+                "HOMEY_INTENT_V2", "HOMEY_RETRIEVAL",
+                "HOMEY_SEMANTIC_GUARD", "HOMEY_FLIGHT_RECORDER",
+            ]),
         )
 
     except Exception as e:
@@ -201,6 +240,11 @@ def score_fit(req: FitRequest):
     Score renter-property fit using only safe signals.
     credit_score, criminal_record etc. are rejected by schema (extra=forbid).
     """
+    if not is_enabled("HOMEY_FIT"):
+        raise HTTPException(
+            status_code=403,
+            detail="policy_gated: HOMEY_FIT is disabled pending calibration and approval",
+        )
     try:
         inp    = SoftFitInput(**req.model_dump())
         result = compute_soft_fit(inp)
@@ -232,6 +276,11 @@ def broker_fit(req: BrokerFitRequest):
     Task 14: Broker Explanation.
     Safe 4-part summary for broker. Restricted fields blocked from output.
     """
+    if not is_enabled("HOMEY_BROKER_CARDS"):
+        raise HTTPException(
+            status_code=403,
+            detail="policy_gated: HOMEY_BROKER_CARDS is disabled pending legal review",
+        )
     result = build_broker_explanation(
         lead_id=req.lead_id,
         fit_result=req.fit_result,

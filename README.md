@@ -26,7 +26,13 @@ This repo is designed to be easy to run locally and easy to hand off to another 
 | `eval/harness.py` | Runs the full evaluation suite and prints a human-readable report. |
 | `stress/combined_stress_day.py` | Runs an end-to-end stress scenario across the main system layers. |
 | `tests/test_all.py` | Main test file covering intent, retrieval, guard, fit, memory, routing, and observability behavior. |
-| `tests/test_integration_api.py` | FastAPI smoke tests for the HTTP layer. |
+| `tests/test_redteam.py` | 54-test adversarial gauntlet covering restricted data, injection, memory poisoning, role boundaries, and PII leakage. |
+| `tests/test_contracts.py` | API envelope, source metadata, feature flag, and degraded-mode contracts. |
+| `schemas/outbound.py` | Typed response, guard status, trust receipt, and error envelopes. |
+| `schemas/source.py` | Source freshness, audience, surface, and supersession contract. |
+| `infra/feature_flags.py` | Conservative production feature-flag registry. |
+| `infra/degraded_mode.py` | Safe fallbacks for missing dependencies and low-confidence behavior. |
+| `infra/slo_report.py` | Operational report generated from the flight recorder. |
 
 ## Requirements
 
@@ -113,10 +119,24 @@ pytest -q
 python -X utf8 eval/harness.py
 ```
 
+This runs 110 cases across five families and reports seven scored dimensions.
+
+### Run the red-team gauntlet
+
+```bash
+pytest tests/test_redteam.py -v
+```
+
 ### Run the stress scenario
 
 ```bash
 python -X utf8 stress/combined_stress_day.py
+```
+
+### Generate the SLO report
+
+```bash
+python -X utf8 infra/slo_report.py
 ```
 
 ### Start the API
@@ -140,6 +160,8 @@ curl http://127.0.0.1:8000/health
 ## Clean-room proof
 
 For the exact validation transcript and environment notes, see `docs/CLEAN_ROOM_PROOF.md`.
+
+For the complete architecture, end-to-end workflow, and review questions, see `explain.md`.
 
 ## Current status
 

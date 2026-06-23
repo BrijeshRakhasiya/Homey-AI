@@ -20,6 +20,7 @@ class UserRole(str, Enum):
 class IntentState(BaseModel):
     raw_input: str
     role: UserRole
+    intent: str = "unknown"
     confidence: float                    # 0.0 to 1.0
     area: Optional[str] = None
     budget: Optional[int] = None

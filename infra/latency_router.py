@@ -15,6 +15,7 @@ Why structured?
 """
 
 import hashlib
+import time
 from typing import Optional
 from pydantic import BaseModel
 from observability.stream import emit_latency_event
@@ -87,12 +88,15 @@ def route_for_latency(raw_input: str) -> LatencyRoute:
 
     Dashboard event: latency_route_selected with tier and model_called.
     """
+    started = time.perf_counter()
     text = raw_input.strip().lower()
 
     # ── Tier 1: Static ────────────────────────────────────────────────────────
     if text in STATIC_RESPONSES:
-        event = emit_latency_event("static", False, False,
-                                   LATENCY_BUDGETS["static"])
+        event = emit_latency_event(
+            "static", False, False, LATENCY_BUDGETS["static"],
+            (time.perf_counter() - started) * 1000,
+        )
         return LatencyRoute(
             tier="static",
             response=STATIC_RESPONSES[text],
@@ -105,8 +109,10 @@ def route_for_latency(raw_input: str) -> LatencyRoute:
     # ── Tier 2: Cache hit ─────────────────────────────────────────────────────
     key = _cache_key(text)
     if key in _cache:
-        event = emit_latency_event("cache", False, True,
-                                   LATENCY_BUDGETS["cache"])
+        event = emit_latency_event(
+            "cache", False, True, LATENCY_BUDGETS["cache"],
+            (time.perf_counter() - started) * 1000,
+        )
         return LatencyRoute(
             tier="cache",
             response=_cache[key],
@@ -118,8 +124,10 @@ def route_for_latency(raw_input: str) -> LatencyRoute:
 
     # ── Tier 3: Retrieval only ────────────────────────────────────────────────
     if any(p in text for p in FAQ_PATTERNS):
-        event = emit_latency_event("retrieval_only", False, False,
-                                   LATENCY_BUDGETS["retrieval_only"])
+        event = emit_latency_event(
+            "retrieval_only", False, False, LATENCY_BUDGETS["retrieval_only"],
+            (time.perf_counter() - started) * 1000,
+        )
         return LatencyRoute(
             tier="retrieval_only",
             response=None,
@@ -130,8 +138,10 @@ def route_for_latency(raw_input: str) -> LatencyRoute:
         )
 
     # ── Tier 4: Full LLM ──────────────────────────────────────────────────────
-    event = emit_latency_event("full_llm", True, False,
-                               LATENCY_BUDGETS["full_llm"])
+    event = emit_latency_event(
+        "full_llm", True, False, LATENCY_BUDGETS["full_llm"],
+        (time.perf_counter() - started) * 1000,
+    )
     return LatencyRoute(
         tier="full_llm",
         response=None,

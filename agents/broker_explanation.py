@@ -15,14 +15,16 @@ Output changes from v1:
 import re
 from typing import Any, List, Optional
 from pydantic import BaseModel
-from observability.stream import emit_broker_event
+from observability.stream import emit_broker_event, emit_event
 
 
 # ── Restricted field names (Layer 1) ──────────────────────────────────────────
 RESTRICTED_FIELDS: list[str] = [
     "credit_score", "criminal_record", "eviction_history",
     "raw_background_report", "ssn", "dob", "medical_history",
-    "fico", "screening_result", "risk_level",
+    "fico", "screening_result", "risk_level", "income_amount",
+    "race", "ethnicity", "national_origin", "religion", "disability",
+    "gender", "sex", "familial_status", "marital_status",
 ]
 
 # ── Restricted content patterns (Layer 2) ─────────────────────────────────────
@@ -141,6 +143,14 @@ def build_broker_explanation(
         caveat = f"{caveat} {note}" if caveat else note
 
     event = emit_broker_event(lead_id, broker_status, len(blocked))
+    emit_event("broker_context_card_generated", {
+        "lead_id": lead_id,
+        "broker_status": broker_status,
+        "restricted_fields_blocked_count": len(blocked),
+        "missing_item_count": len(missing),
+        "caveats_count": int(caveat is not None),
+        "next_action": next_action,
+    })
 
     return BrokerExplanation(
         lead_id=lead_id,
@@ -152,3 +162,23 @@ def build_broker_explanation(
         restricted_fields_blocked=blocked,
         dashboard_event=event,
     )
+
+
+def generate_explanation(lead_id: str, fit_result: dict, raw_fields: dict) -> dict:
+    """Dictionary/card-text contract used by API clients and red-team tests."""
+    result = build_broker_explanation(lead_id, fit_result, raw_fields)
+    sections = [result.summary]
+    if result.evidence:
+        sections.append("Evidence:\n" + "\n".join(f"- {item}" for item in result.evidence))
+    if result.caveat:
+        sections.append(f"Caveat: {result.caveat}")
+    sections.append(f"Next action: {result.next_action}")
+    return {
+        "card_text": "\n\n".join(sections),
+        "broker_status": result.broker_status,
+        "next_action": result.next_action,
+        "restricted_fields_blocked": len(result.restricted_fields_blocked),
+        "restricted_field_names": result.restricted_fields_blocked,
+        "missing_items": fit_result.get("missing_signals", []),
+        "event": result.dashboard_event,
+    }

@@ -22,6 +22,8 @@ from langgraph.graph import StateGraph, END
 
 from agents.intent_atlas import run_intent_atlas
 from agents.retrieval_gov import governed_retrieval
+from agents.semantic_guard import check_input, check_output, safe_fallback_response
+from infra.feature_flags import is_enabled
 from observability.stream import (
     emit_guard_event, emit_graph_event, emit_retrieval_event
 )
@@ -96,6 +98,35 @@ def node_retrieve(state: HomeyState) -> HomeyState:
     """ONLY job: run governed retrieval based on intent."""
     intent = state.get("intent", {})
     role   = intent.get("role", "unknown")
+
+    if not is_enabled("HOMEY_RETRIEVAL"):
+        event = emit_retrieval_event(
+            state["audience"], 0, False, state["session_id"]
+        )
+        state["retrieval"] = {
+            "chunks": [],
+            "evidence_sufficient": False,
+            "fallback_message": (
+                intent.get("clarification_prompt")
+                or "I don't have enough verified listing information right now. "
+                   "Tell me your area, budget, and move-in timing."
+            ),
+            "trust_receipt": {
+                "chunks_considered": 0,
+                "chunks_allowed": 0,
+                "chunks_blocked": 0,
+                "chunks_stale": 0,
+                "chunks_internal_blocked": 0,
+                "freshness_status": "unknown",
+                "evidence_sufficient": False,
+                "fallback_reason": "retrieval_feature_disabled",
+                "source_ids": [],
+            },
+            "dashboard_event": event,
+        }
+        state["events"].append(event)
+        state["nodes_executed"] += 1
+        return state
 
     # Skip retrieval for unknown role or simple greetings
     if role == "unknown" or not state["raw_input"].strip():
@@ -198,12 +229,21 @@ def node_guard(state: HomeyState) -> HomeyState:
     This node ALWAYS runs regardless of upstream results.
     """
     response = state.get("response") or ""
+    guard_result = check_output(response)
     triggered_phrase = _guard_match(response)
 
-    if triggered_phrase:
+    if guard_result["blocked"] or triggered_phrase:
         state["response"]     = SAFE_FALLBACK_RESPONSE
         state["guard_passed"] = False
-        event = emit_guard_event(True, triggered_phrase, state["session_id"])
+        if guard_result["blocked"]:
+            state["response"] = safe_fallback_response(guard_result["category"])
+        event = emit_guard_event(
+            True,
+            guard_result["reason"] if guard_result["blocked"] else triggered_phrase,
+            state["session_id"],
+            layer=guard_result["layer"] if guard_result["blocked"] else "keyword",
+            category=guard_result["category"] if guard_result["blocked"] else "approval_language",
+        )
     else:
         state["guard_passed"] = True
         event = emit_guard_event(False, None, state["session_id"])
@@ -262,6 +302,54 @@ def run_graph(raw_input: str,
     Run the full Homey graph for one user message.
     Returns: {response, guard_passed, events, error}
     """
+    input_guard = check_input(raw_input)
+    if input_guard["blocked"]:
+        guard_event = emit_guard_event(
+            True,
+            input_guard["reason"],
+            session_id,
+            layer=input_guard["layer"],
+            category=input_guard["category"],
+        )
+        graph_event = emit_graph_event(
+            session_id=session_id,
+            nodes_executed=1,
+            guard_passed=False,
+            response_type="refusal",
+        )
+        return {
+            "response": safe_fallback_response(input_guard["category"]),
+            "response_type": "refusal",
+            "guard_passed": False,
+            "guard_status": {
+                "input_checked": True,
+                "output_checked": False,
+                "triggered": True,
+                "layer": input_guard["layer"],
+                "category": input_guard["category"],
+                "reason": input_guard["reason"],
+            },
+            "events": [guard_event, graph_event],
+            "error": None,
+            "intent": {
+                "role": "unknown",
+                "confidence": 1.0,
+                "missing_fields": [],
+                "clarification_prompt": None,
+            },
+            "source_receipt": {
+                "chunks_considered": 0,
+                "chunks_allowed": 0,
+                "chunks_blocked": 0,
+                "chunks_stale": 0,
+                "chunks_internal_blocked": 0,
+                "freshness_status": "unknown",
+                "evidence_sufficient": False,
+                "fallback_reason": "restricted_request",
+                "source_ids": [],
+            },
+        }
+
     global _graph
     if _graph is None:
         _graph = build_homey_graph()
@@ -281,10 +369,37 @@ def run_graph(raw_input: str,
     }
 
     final = _graph.invoke(initial)
+    response_type = "answer"
+    if not final.get("guard_passed", True):
+        response_type = "refusal"
+    elif final.get("error"):
+        response_type = "fallback"
+    elif final.get("intent", {}).get("missing_fields"):
+        response_type = "clarification"
     return {
         "response":     final.get("response"),
+        "response_type": response_type,
         "guard_passed": final.get("guard_passed"),
+        "guard_status": {
+            "input_checked": True,
+            "output_checked": True,
+            "triggered": not final.get("guard_passed", True),
+            "layer": None,
+            "category": None,
+            "reason": None,
+        },
         "events":       final.get("events", []),
         "error":        final.get("error"),
         "intent":       final.get("intent"),
+        "source_receipt": final.get("retrieval", {}).get("trust_receipt", {
+            "chunks_considered": 0,
+            "chunks_allowed": 0,
+            "chunks_blocked": 0,
+            "chunks_stale": 0,
+            "chunks_internal_blocked": 0,
+            "freshness_status": "unknown",
+            "evidence_sufficient": False,
+            "fallback_reason": "retrieval_not_used",
+            "source_ids": [],
+        }),
     }

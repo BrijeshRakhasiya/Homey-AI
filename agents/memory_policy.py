@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from schemas.memory import MemoryCategory, MemoryEntry, NEVER_STORE, EXPIRY_DAYS
-from observability.stream import emit_memory_event, emit_blocked_memory_event
+from observability.stream import emit_memory_event, emit_blocked_memory_event, emit_event
+from agents.semantic_guard import check_memory_key
 
 # ── Layer 2: semantic patterns (key OR value) ──────────────────────────────────
 RESTRICTED_SEMANTIC_PATTERNS: dict[str, str] = {
@@ -77,6 +78,15 @@ class MemoryStore:
         # Layer 1 — exact name
         if any(blocked in key.lower() for blocked in NEVER_STORE):
             emit_blocked_memory_event(f"layer1_name_block:{key}")
+            return False
+
+        guard_result = check_memory_key(key, str(value))
+        if guard_result["blocked"]:
+            emit_event("memory_blocked", {
+                "key": key,
+                "category": guard_result["category"],
+                "reason": guard_result["reason"],
+            })
             return False
 
         # Layer 2 — semantic pattern
@@ -151,3 +161,15 @@ class MemoryStore:
 
 # Module-level singleton for single-session use
 memory = MemoryStore()
+
+
+def store(key: str, value: Any, session: Optional[dict] = None) -> dict:
+    """Compatibility contract used by red-team and integration tests."""
+    target = session.get("_memory_store") if isinstance(session, dict) else None
+    if not isinstance(target, MemoryStore):
+        target = memory
+    stored = target.store(key, value, MemoryCategory.DURABLE)
+    return {
+        "stored": stored,
+        "reason": None if stored else "restricted memory content",
+    }

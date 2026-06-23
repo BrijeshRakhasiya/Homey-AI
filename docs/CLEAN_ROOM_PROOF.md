@@ -31,10 +31,11 @@ python -m uvicorn infra.integration:app --port 8000
 
 ## Verified outputs
 
-- `pytest -q` → `80 passed`
-- `python eval/harness.py` → `23/23 passed`
+- `pytest tests -q` → `144 passed`
+- `python eval/harness.py` → `110/110 passed` across five families and seven dimensions
 - `python stress/combined_stress_day.py` → `9/9 passed`
-- API boot → `GET /health` returned `200`
+- API boot → both port 8000 and 8001 health checks returned `200`
+- Restricted HTTP request → typed refusal with `guard_status.category=credit`
 
 ## Environment-sensitive behavior
 
@@ -42,7 +43,6 @@ python -m uvicorn infra.integration:app --port 8000
 - The evaluation harness and stress script can emit TensorFlow / FAISS startup warnings on first import.
 - Retrieval can fall back to sample data until the real corpus contract is wired.
 - The LLM-backed path is optional and only activates when `GROQ_API_KEY` is set.
-- `sitecustomize.py` disables pytest plugin auto-discovery so global plugins do not affect local runs.
 
 ## What is still blocked externally
 

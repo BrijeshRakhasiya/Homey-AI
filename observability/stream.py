@@ -26,6 +26,44 @@ EVENT_SCHEMA_VERSION = "1.1"
 DEFAULT_TENANT_ID = os.getenv("HOMEY_TENANT_ID", "vryfid")
 EVENT_HASH_SALT = os.getenv("HOMEY_EVENT_HASH_SALT", "homey-dev-salt")
 
+VALID_EVENT_TYPES = {
+    "intent_classified", "confidence_bucket", "missing_field_count",
+    "retrieval_governed", "retrieval_chunks_blocked", "stale_blocked_count",
+    "internal_blocked_count", "source_conflict_detected", "index_built",
+    "index_build_failed", "corpus_load_attempted", "corpus_chunk_corrupted",
+    "guard_checked", "semantic_guard_triggered", "restricted_field_attempted",
+    "policy_gated", "memory_stored", "memory_blocked", "blocked_memory_attempt",
+    "correction_applied", "readiness_expired", "squad_profile_built",
+    "squad_profile_created", "squad_conflict_detected", "squad_invite_created",
+    "squad_alignment_updated", "campaign_entry_routed", "hook_detected",
+    "schema_validated", "schema_failed", "schema_validation_failed",
+    "schema_unknown_fields", "feature_flag_used", "fallback_returned",
+    "broker_explanation_generated", "broker_context_card_generated",
+    "soft_fit_scored", "executive_fit_evaluated", "eval_harness_run",
+    "latency_route_selected", "failure_logged", "privacy_audit_passed",
+    "graph_completed", "community_context_applied", "renter_registered",
+    "broker_registered", "listing_added", "income_verified",
+}
+
+_PII_FIELDS = frozenset({
+    "credit_score", "fico", "ssn", "social_security", "social_security_number",
+    "dob", "date_of_birth", "income_amount", "criminal_record",
+    "eviction_history", "background_check_result", "raw_background_report",
+    "passport_number", "driver_license_number", "tax_id",
+})
+
+
+def _scrub_pii(value: Any) -> Any:
+    """Recursively redact restricted fields before an event is persisted."""
+    if isinstance(value, dict):
+        return {
+            key: ("REDACTED" if key.lower() in _PII_FIELDS else _scrub_pii(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_pii(item) for item in value]
+    return value
+
 
 def _hash_token(value: Any) -> str:
     material = f"{EVENT_HASH_SALT}:{value}".encode("utf-8")
@@ -42,7 +80,7 @@ def _sanitize_text(value: Any) -> str:
 
 
 def _sanitize_payload(payload: dict) -> dict:
-    sanitized = dict(payload)
+    sanitized = _scrub_pii(dict(payload))
     sanitized.setdefault("schema_version", EVENT_SCHEMA_VERSION)
     sanitized.setdefault("tenant_id", DEFAULT_TENANT_ID)
 
@@ -82,6 +120,13 @@ def _emit(payload: dict) -> dict:
     return payload
 
 
+def emit_event(event_type: str, payload: Optional[dict] = None) -> dict:
+    """Emit a validated event while preserving the legacy dictionary interface."""
+    if event_type not in VALID_EVENT_TYPES:
+        raise ValueError(f"Unknown event type: {event_type}")
+    return _emit({"event_type": event_type, **(payload or {})})
+
+
 # ─── Public emitters ──────────────────────────────────────────────────────────
 
 def emit_intent_event(role: str, confidence: float,
@@ -107,11 +152,14 @@ def emit_retrieval_event(audience: str, chunks_returned: int,
 
 
 def emit_guard_event(triggered: bool, reason: Optional[str],
-                     session_id: str) -> dict:
+                     session_id: str, layer: Optional[str] = None,
+                     category: Optional[str] = None) -> dict:
     return _emit({
         "event_type": "guard_checked",
         "triggered": triggered,
         "reason": reason,
+        "layer": layer,
+        "category": category,
         "session_id": session_id,
     })
 
@@ -193,13 +241,15 @@ def emit_blocked_memory_event(key: str) -> dict:
 
 
 def emit_latency_event(tier: str, model_called: bool,
-                       cache_hit: bool, budget_ms: int) -> dict:
+                       cache_hit: bool, budget_ms: int,
+                       latency_ms: Optional[float] = None) -> dict:
     return _emit({
         "event_type": "latency_route_selected",
         "tier": tier,
         "model_called": model_called,
         "cache_hit": cache_hit,
         "latency_budget_ms": budget_ms,
+        "latency_ms": latency_ms,
     })
 
 

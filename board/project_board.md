@@ -117,3 +117,30 @@ If someone copies the broker_explanation module but removes the `RESTRICTED_FIEL
 4. **Biggest remaining risk:** Guard node uses string matching, not semantic matching. A paraphrased blocked phrase will pass. Week 2 priority: add embedding-based similarity check.
 
 5. **First metric that proves value after week 1:** Intent classification accuracy — specifically the unknown-role rate. If it drops below 15% within one week of real traffic, the intent atlas is working. Dashboard event: `intent_classified` with `role=unknown` count.
+
+---
+
+## Final-Evaluation Feature Flags
+
+| Flag | Default | Production gate |
+|---|---:|---|
+| `HOMEY_INTENT_V2` | on | Low-risk typed classification |
+| `HOMEY_RETRIEVAL` | off | Corpus/source contract and review |
+| `HOMEY_SEMANTIC_GUARD` | off | Real-message threshold calibration |
+| `HOMEY_MEMORY` | limited | Preferences and session context only |
+| `HOMEY_SQUAD` | on | Prototype with private-member boundary |
+| `HOMEY_BROKER_CARDS` | off | Product/legal language approval |
+| `HOMEY_FIT` | off | Weight and label calibration |
+| `HOMEY_CAMPAIGN_ROUTER` | on | Test tags; safe campaign language |
+| `HOMEY_TRUST_RECEIPTS` | internal only | External wording pending |
+| `HOMEY_FLIGHT_RECORDER` | on | PII scrubber and hashing enabled |
+
+## Final-Evaluation Artifacts
+
+- `eval/golden_set.json`: 110 cases across five families.
+- `tests/test_redteam.py`: 54 adversarial tests.
+- `tests/test_contracts.py`: contracts, degraded mode, flags, and API safety.
+- `fixtures/vryfid_fixture_pack_v0.json`: 25 integration fixtures.
+- `RISK_MEMO.md`: ranked production risks.
+- `board/live_defense_answers.md`: all 12 defense answers.
+- `explain.md`: architecture, workflow, operations, and reviewer questions.

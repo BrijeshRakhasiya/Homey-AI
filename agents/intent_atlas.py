@@ -43,7 +43,15 @@ KNOWN_AREAS = [
     "brooklyn", "manhattan", "queens", "bronx", "staten island",
     "nyu", "jersey city", "hoboken", "astoria", "williamsburg",
     "bushwick", "harlem", "upper east side", "upper west side",
-    "downtown", "midtown", "flushing", "jackson heights",
+    "downtown", "midtown", "flushing", "jackson heights", "park slope",
+]
+
+AREA_ALIASES = {"bk": "Brooklyn", "jc": "Jersey City"}
+
+CAMPAIGN_KEYWORDS = [
+    "verified drop", "referral link", "referral code", "housing event",
+    "housing fair", "preview challenge", "first look", "rent detective",
+    "tiktok", "instagram dm", "facebook post",
 ]
 
 
@@ -93,6 +101,9 @@ def _extract_area(text: str) -> Optional[str]:
     for area in KNOWN_AREAS:
         if area in text_lower:
             return area.title()
+    for alias, normalized in AREA_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", text_lower):
+            return normalized
     return None
 
 
@@ -123,6 +134,8 @@ def _detect_urgency(text: str) -> str:
 
 def _detect_role(text: str) -> tuple[UserRole, float]:
     text_lower = text.lower()
+    if any(k in text_lower for k in CAMPAIGN_KEYWORDS):
+        return UserRole.CAMPAIGN, 0.84
     if any(k in text_lower for k in BROKER_KEYWORDS):
         return UserRole.BROKER, 0.87
     if any(k in text_lower for k in SQUAD_KEYWORDS):
@@ -130,6 +143,45 @@ def _detect_role(text: str) -> tuple[UserRole, float]:
     if any(k in text_lower for k in RENTER_KEYWORDS):
         return UserRole.RENTER, 0.78
     return UserRole.UNKNOWN, 0.25
+
+
+def _detect_intent(text: str, role: UserRole) -> str:
+    from agents.semantic_guard import check_input
+    guard = check_input(text)
+    if guard["blocked"]:
+        return {
+            "approval_language": "approval_language",
+            "prompt_injection": "prompt_injection",
+            "pii": "restricted_data_probe",
+            "credit": "restricted_data_probe",
+            "criminal": "restricted_data_probe",
+            "eviction": "restricted_data_probe",
+            "protected_class": "restricted_data_probe",
+        }.get(guard["category"], "restricted_data_probe")
+    lower = text.lower()
+    if role == UserRole.CAMPAIGN:
+        return "campaign_entry"
+    if role == UserRole.BROKER:
+        return "broker_request"
+    if role == UserRole.SQUAD:
+        if any(term in lower for term in ("invite", "add them", "hasn't signed up", "has not signed up")):
+            return "squad_invite"
+        if any(term in lower for term in ("but i", "disagree", "different", "conflict", "except")):
+            return "squad_conflict"
+        if any(term in lower for term in ("what info", "summary", "verified so far")):
+            return "squad_info"
+        return "squad_search"
+    if any(term in lower for term in (
+        "how does", "what docs", "what documents", "what is homey",
+        "average rent", "rent stabilized", "rent-stabilized",
+        "can i afford", "what neighborhoods",
+    )):
+        return "renter_info"
+    if any(term in lower for term in ("help me", "search for me", "process work")):
+        return "support"
+    if role == UserRole.RENTER:
+        return "renter_search"
+    return "unknown"
 
 
 # ─── Clarification prompt builder ─────────────────────────────────────────────
@@ -158,6 +210,7 @@ def run_intent_atlas(raw_input: str,
         return IntentState(
             raw_input=raw_input,
             role=UserRole.UNKNOWN,
+            intent="unknown",
             confidence=0.0,
             missing_fields=["user_role", "area", "budget", "bedrooms"],
             clarification_prompt="Hi! Are you looking to rent a home, or do you manage properties?",
@@ -171,15 +224,17 @@ def run_intent_atlas(raw_input: str,
     area     = _extract_area(text)
     timing   = _extract_timing(text)
     urgency  = _detect_urgency(text)
+    intent_name = _detect_intent(text, role)
 
     # Collect missing fields (only for renter/squad flows)
     missing: list[str] = []
     if role == UserRole.UNKNOWN:
         missing.append("user_role")
-    if role in (UserRole.RENTER, UserRole.SQUAD, UserRole.UNKNOWN):
+    if role in (UserRole.RENTER, UserRole.SQUAD, UserRole.CAMPAIGN, UserRole.UNKNOWN):
         if budget   is None: missing.append("budget")
         if bedrooms is None: missing.append("bedrooms")
         if area     is None: missing.append("area")
+        if timing   is None: missing.append("timing")
 
     # Clarification — ask about FIRST missing field only (mobile-friendly)
     clarification: Optional[str] = None
@@ -191,6 +246,7 @@ def run_intent_atlas(raw_input: str,
     return IntentState(
         raw_input=raw_input,
         role=role,
+        intent=intent_name,
         confidence=confidence,
         area=area,
         budget=budget,

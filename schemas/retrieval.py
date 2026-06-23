@@ -4,9 +4,10 @@ Chunk metadata + retrieval result types.
 Every chunk in the FAISS index must have this metadata attached.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import date
+from schemas.outbound import TrustReceipt
 
 
 class ChunkMetadata(BaseModel):
@@ -17,6 +18,8 @@ class ChunkMetadata(BaseModel):
     sensitivity: str          # "public" | "internal" | "restricted"
     allowed_audience: List[str]  # ["renter"] | ["broker"] | ["all"]
     is_stale: bool = False
+    claim_key: Optional[str] = None
+    claim_value: Optional[str] = None
 
 
 class RetrievedChunk(BaseModel):
@@ -32,3 +35,4 @@ class RetrievalResult(BaseModel):
     evidence_sufficient: bool = False
     fallback_message: Optional[str] = None
     dashboard_event: dict = {}
+    trust_receipt: TrustReceipt = Field(default_factory=TrustReceipt)

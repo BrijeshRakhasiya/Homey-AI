@@ -11,7 +11,41 @@ Key rules:
 
 from typing import List
 from schemas.squad import SquadMember, SquadProfile
-from observability.stream import emit_squad_event
+from observability.stream import emit_squad_event, emit_event
+
+_MEMBER_PRIVATE_FIELDS = {
+    "budget_exact", "income_amount", "credit_hint", "immigration_status",
+    "ssn", "dob", "credit_score", "criminal_record", "eviction_history",
+}
+
+
+def emit_squad_invite(squad_id: str, missing_member_hint: str = "member_pending") -> str:
+    event = emit_event("squad_invite_created", {
+        "squad_id": squad_id,
+        "missing_member_hint": missing_member_hint,
+        "invite_reason": "squad_alignment_incomplete",
+    })
+    return event["event_id"]
+
+
+def emit_squad_alignment(squad_id: str, alignment_score: float,
+                         conflict_count: int, missing_count: int = 0) -> dict:
+    return emit_event("squad_alignment_updated", {
+        "squad_id": squad_id,
+        "alignment_score": round(alignment_score, 2),
+        "conflict_count": conflict_count,
+        "missing_members": missing_count,
+    })
+
+
+def get_broker_safe_squad_summary(squad_profile: dict) -> dict:
+    """Return aggregate squad state with all member-private fields removed."""
+    import copy
+    safe = copy.deepcopy(squad_profile)
+    for member in safe.get("members", []):
+        for field in _MEMBER_PRIVATE_FIELDS:
+            member.pop(field, None)
+    return safe
 
 
 def build_squad_profile(
@@ -94,6 +128,7 @@ def build_squad_profile(
         )
 
     event = emit_squad_event(squad_id, len(members), len(conflicts), alignment)
+    emit_squad_alignment(squad_id, alignment, len(conflicts))
 
     return SquadProfile(
         squad_id=squad_id,
